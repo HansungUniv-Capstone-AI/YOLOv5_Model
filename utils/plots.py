@@ -1,14 +1,11 @@
-# YOLOv5 🚀 by Ultralytics, GPL-3.0 license
-"""
-Plotting utils
-"""
 
 import math
 import os
+import threading
 from copy import copy
 from pathlib import Path
 from urllib.error import URLError
-
+import time
 import cv2
 import matplotlib
 import matplotlib.pyplot as plt
@@ -19,22 +16,106 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 
 from utils.general import (CONFIG_DIR, FONT, LOGGER, Timeout, check_font, check_requirements, clip_coords,
-                           increment_path, is_ascii, threaded, try_except, xywh2xyxy, xyxy2xywh)
+                           increment_path, is_ascii, try_except, xywh2xyxy, xyxy2xywh)
 from utils.metrics import fitness
 
+import requests
+import json
+
+
+def send_api_direction(direction):
+    url = "https://oum9lh2tzc.execute-api.ap-northeast-2.amazonaws.com/cart/cart/direction"
+    method = 'POST'
+    headers = {'Content-Type': 'application/json', 'charset': 'UTF-8', 'Accept': '*/*'}
+    body = {
+        "state": {
+            "direction": direction
+        }
+    }
+
+    try:
+        if method == 'GET':
+            response = requests.get(url, headers=headers)
+        elif method == 'POST':
+            response = requests.post(url, headers=headers,
+                                     data=json.dumps(body, ensure_ascii=False, indent="\t"))
+        #print("response status %r" % response.status_code)
+        #print("response text %r" % response.text)
+    except Exception as ex:
+        print(ex)  # 호출 예시 send_api("/test", "POST")
+
+def send_api_speed(speed):
+    url = "https://oum9lh2tzc.execute-api.ap-northeast-2.amazonaws.com/cart/cart/speed"
+    method = 'POST'
+    headers = {'Content-Type': 'application/json', 'charset': 'UTF-8', 'Accept': '*/*'}
+    body = {
+        "state": {
+            "speed": speed
+        }
+    }
+
+    try:
+        if method == 'GET':
+            response = requests.get(url, headers=headers)
+        elif method == 'POST':
+            response = requests.post(url, headers=headers,
+                                     data=json.dumps(body, ensure_ascii=False, indent="\t"))
+        print("response status %r" % response.status_code)
+        print("response text %r" % response.text)
+    except Exception as ex:
+        print(ex)  # 호출 예시 send_api("/test", "POST")
+
+
+#send_api("center","POST")
 # Settings
 RANK = int(os.getenv('RANK', -1))
 matplotlib.rc('font', **{'size': 11})
 matplotlib.use('Agg')  # for writing to files only
 
 
+
+# thread 1
+def publishing_topic_direction(direction):
+    directionStack = []
+    directionStack.append(direction)
+    popedDirection = directionStack.pop()
+    print("Direction : " + str(popedDirection))
+    if popedDirection > 100:  # 객체가 이미지의 센터보다 왼쪽에 위치
+        print(str(direction) +" <<-- direction left ")
+        send_api_direction("left")
+    elif popedDirection < -100: # 객체가 이미지의 센터보다 오른쪽에 위치
+        print(str(direction) +" direction right -->> ")
+        send_api_direction("right")
+    else:
+        send_api_direction("center")
+    #time.sleep(3)
+
+# thread 2
+def publishing_topic_speed(speed):
+    speedStack = []
+    speedStack.append(speed)
+    popedSpeed = speedStack.pop()
+    print("speed : " + str(popedSpeed))
+    if popedSpeed > 50:  # 바운딩 박스가 큼 -> 객체가 가까이 있음
+        print(str(speed) + "DOWN DOWN ~~")
+        send_api_speed("DOWN")
+    elif popedSpeed < 10:  # 바운딩 박스가 작음 -> 객체가 멀리 있음
+        print(str(speed) + "!!!! UPUPUP")
+        send_api_speed("UP")
+    else:
+        print("else")
+        send_api_speed("STOP")
+
+    #time.sleep(3)
+
+
 class Colors:
     # Ultralytics color palette https://ultralytics.com/
     def __init__(self):
         # hex = matplotlib.colors.TABLEAU_COLORS.values()
-        hexs = ('FF3838', 'FF9D97', 'FF701F', 'FFB21D', 'CFD231', '48F90A', '92CC17', '3DDB86', '1A9334', '00D4BB',
-                '2C99A8', '00C2FF', '344593', '6473FF', '0018EC', '8438FF', '520085', 'CB38FF', 'FF95C8', 'FF37C7')
-        self.palette = [self.hex2rgb(f'#{c}') for c in hexs]
+        hex = ('FF3838', 'FF9D97', 'FF701F', 'FFB21D', 'CFD231', '48F90A', '92CC17', '3DDB86', '1A9334', '00D4BB',
+               '2C99A8', '00C2FF', '344593', '6473FF', '0018EC', '8438FF', '520085', 'CB38FF', 'FF95C8', 'FF37C7')
+        self.palette = [self.hex2rgb('#' + c) for c in hex]
         self.n = len(self.palette)
 
     def __call__(self, i, bgr=False):
@@ -82,10 +163,14 @@ class Annotator:
 
     def box_label(self, box, label='', color=(128, 128, 128), txt_color=(255, 255, 255)):
         # Add one xyxy box to image with label
+        centerWidth, centerHeight = 0, 0
+
         if self.pil or not is_ascii(label):
             self.draw.rectangle(box, width=self.lw, outline=color)  # box
             if label:
                 w, h = self.font.getsize(label)  # text width, height
+                centerWidth = int(w/2)
+                centerHeight = int(h/2)
                 outside = box[1] - h >= 0  # label fits outside box
                 self.draw.rectangle(
                     (box[0], box[1] - h if outside else box[1], box[0] + w + 1,
@@ -100,9 +185,27 @@ class Annotator:
             if label:
                 tf = max(self.lw - 1, 1)  # font thickness
                 w, h = cv2.getTextSize(label, 0, fontScale=self.lw / 3, thickness=tf)[0]  # text width, height
-                outside = p1[1] - h >= 3
+                outside = p1[1] - h - 3 >= 0  # label fits outside box
                 p2 = p1[0] + w, p1[1] - h - 3 if outside else p1[1] + h + 3
                 cv2.rectangle(self.im, p1, p2, color, -1, cv2.LINE_AA)  # filled
+                p1Np = np.array(list(p1))
+                p2Np = np.array(list(p2))
+                ocWh = (p1Np + p2Np) / 2 # object center width height
+                ocw, och = ocWh
+
+                direction = centerWidth - ocw
+                speed = abs(centerWidth-ocw)
+                if "person" in label:
+                    print("person class Object Detection")
+                    th2 = threading.Thread(target=publishing_topic_speed,
+                                           name="thread 2 :",
+                                           args=(speed,))
+                    th2.start()  # sub thread 2 start()
+                    th1 = threading.Thread(target=publishing_topic_direction,
+                                           name="thread 1 :",
+                                           args=(direction,))
+                    th1.start()  # sub thread 1 start()re
+
                 cv2.putText(self.im,
                             label, (p1[0], p1[1] - 2 if outside else p1[1] + h + 2),
                             0,
@@ -184,7 +287,6 @@ def output_to_target(output):
     return np.array(targets)
 
 
-@threaded
 def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max_size=1920, max_subplots=16):
     # Plot image grid with labels
     if isinstance(images, torch.Tensor):
@@ -421,7 +523,7 @@ def plot_results(file='path/to/results.csv', dir=''):
     ax = ax.ravel()
     files = list(save_dir.glob('results*.csv'))
     assert len(files), f'No results.csv files found in {save_dir.resolve()}, nothing to plot.'
-    for f in files:
+    for fi, f in enumerate(files):
         try:
             data = pd.read_csv(f)
             s = [x.strip() for x in data.columns]
